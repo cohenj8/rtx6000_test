@@ -1,0 +1,85 @@
+name: EBI to S3 Relay
+on:
+  workflow_dispatch:
+    inputs:
+      dataset:
+        description: 'Which dataset to relay'
+        required: true
+        type: choice
+        options:
+          - wes
+          - wgs
+
+jobs:
+  relay:
+    runs-on: ubuntu-latest
+    timeout-minutes: 350
+    steps:
+      - name: Install AWS CLI
+        run: |
+          curl -sS "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip" -o "awscliv2.zip"
+          unzip -q awscliv2.zip
+          sudo ./aws/install
+
+      - name: Configure AWS profile
+        run: |
+          mkdir -p ~/.aws
+          cat >> ~/.aws/credentials << EOF
+          [dellcsc]
+          aws_access_key_id = ${{ secrets.S3_ACCESS_KEY_ID }}
+          aws_secret_access_key = ${{ secrets.S3_SECRET_ACCESS_KEY }}
+          EOF
+          cat >> ~/.aws/config << EOF
+          [profile dellcsc]
+          endpoint_url = ${{ secrets.S3_ENDPOINT }}
+          s3 =
+              payload_signing_enabled = false
+              addressing_style = path
+              max_queue_size = 10000
+              multipart_chunksize = 128MB
+              max_concurrent_requests = 32
+              signature_version = s3v4
+          request_checksum_calculation = when_required
+          response_checksum_validation = when_required
+          EOF
+          chmod 600 ~/.aws/credentials ~/.aws/config
+
+      - name: Relay WES FASTQ (EBI -> S3, streamed, no local disk)
+        if: ${{ github.event.inputs.dataset == 'wes' }}
+        run: |
+          set -euo pipefail
+          FILES=(
+            "SRR789/000/SRR7890830/SRR7890830_1.fastq.gz"
+            "SRR789/000/SRR7890830/SRR7890830_2.fastq.gz"
+            "SRR789/006/SRR7890846/SRR7890846_1.fastq.gz"
+            "SRR789/006/SRR7890846/SRR7890846_2.fastq.gz"
+          )
+          for f in "${FILES[@]}"; do
+            name=$(basename "$f")
+            echo "=== Relaying $name ==="
+            curl -sS -L --fail "https://ftp.sra.ebi.ac.uk/vol1/fastq/$f" | \
+              aws --profile dellcsc s3 cp - "s3://v89865/rtx6000_bench/fastq/wes/$name"
+            echo "=== Done $name ==="
+          done
+
+      - name: Relay WGS FASTQ (EBI -> S3, streamed, no local disk)
+        if: ${{ github.event.inputs.dataset == 'wgs' }}
+        run: |
+          set -euo pipefail
+          FILES=(
+            "SRR789/004/SRR7890824/SRR7890824_1.fastq.gz"
+            "SRR789/004/SRR7890824/SRR7890824_2.fastq.gz"
+            "SRR789/007/SRR7890827/SRR7890827_1.fastq.gz"
+            "SRR789/007/SRR7890827/SRR7890827_2.fastq.gz"
+          )
+          for f in "${FILES[@]}"; do
+            name=$(basename "$f")
+            echo "=== Relaying $name ==="
+            curl -sS -L --fail "https://ftp.sra.ebi.ac.uk/vol1/fastq/$f" | \
+              aws --profile dellcsc s3 cp - "s3://v89865/rtx6000_bench/fastq/wgs/$name"
+            echo "=== Done $name ==="
+          done
+
+      - name: Verify uploaded sizes
+        run: |
+          aws --profile dellcsc s3 ls "s3://v89865/rtx6000_bench/fastq/${{ github.event.inputs.dataset }}/" --human-readable
