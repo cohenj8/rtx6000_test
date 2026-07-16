@@ -9,7 +9,7 @@ on:
         options:
           - wes
           - wgs
-          - aspera_test
+          - aria2_test
 
 jobs:
   relay:
@@ -103,53 +103,29 @@ jobs:
           done
           exit $FAIL
 
-      - name: Test Aspera (ascp) throughput vs HTTPS
-        if: ${{ github.event.inputs.dataset == 'aspera_test' }}
+      - name: Test aria2c multi-connection throughput vs single-stream HTTPS
+        if: ${{ github.event.inputs.dataset == 'aria2_test' }}
         run: |
           set -uo pipefail
-          echo "=== Installing micromamba ==="
-          curl -Ls https://micro.mamba.pm/api/micromamba/linux-64/latest | tar -xvj bin/micromamba
-          export MAMBA_ROOT_PREFIX=$HOME/micromamba
-          eval "$(./bin/micromamba shell hook -s posix)"
+          sudo apt-get update -y
+          sudo apt-get install -y aria2
 
-          echo "=== Installing aspera-cli (ascp) from bioconda ==="
-          ./bin/micromamba create -y -n aspera -c bioconda -c conda-forge aspera-cli
-          micromamba activate aspera
+          URL="https://ftp.sra.ebi.ac.uk/vol1/fastq/SRR789/000/SRR7890830/SRR7890830_1.fastq.gz"
 
-          echo "=== Contents of env bin dir ==="
-          ls -la "$MAMBA_ROOT_PREFIX/envs/aspera/bin/" | head -40
+          echo "=== Disk space available (want /mnt for big WGS files later) ==="
+          df -h / /mnt 2>&1 || true
 
-          echo "=== Searching whole env for ascp binary ==="
-          find "$MAMBA_ROOT_PREFIX/envs/aspera" -iname "ascp*" -type f 2>/dev/null
+          echo "=== TEST A: aria2c -x16 -s16 for 60s, to /mnt ==="
+          timeout 65 aria2c -x16 -s16 -k1M --file-allocation=none \
+            --summary-interval=10 --console-log-level=notice \
+            -d /mnt -o aria2_test.gz "$URL" || echo "(aria2c stopped by timeout, expected)"
+          echo "--- bytes fetched by aria2c in ~60s ---"
+          ls -la /mnt/aria2_test.gz 2>&1 || echo "NO FILE"
+          sudo rm -f /mnt/aria2_test.gz /mnt/aria2_test.gz.aria2
 
-          ASCP_BIN=$(find "$MAMBA_ROOT_PREFIX/envs/aspera" -iname "ascp" -type f 2>/dev/null | head -1)
-          if [ -z "$ASCP_BIN" ]; then
-            echo "ASCP_BINARY_NOT_FOUND_ANYWHERE_IN_ENV"
-            echo "=== Full env tree for debugging ==="
-            find "$MAMBA_ROOT_PREFIX/envs/aspera" -maxdepth 4 | head -100
-            exit 1
-          fi
-          echo "Found ascp at: $ASCP_BIN"
-          chmod +x "$ASCP_BIN"
-          "$ASCP_BIN" --version
-
-          KEY=$(find "$MAMBA_ROOT_PREFIX/envs/aspera" -iname "asperaweb_id_dsa.openssh" | head -1)
-          echo "Key path: $KEY"
-          ls -la "$KEY" || echo "KEY_MISSING"
-
-          echo "=== Timed ascp test (60s, capped rate 800Mbps target) ==="
-          timeout 70 "$ASCP_BIN" -QT -l 800m -P33001 \
-            -i "$KEY" \
-            era-fasp@fasp.sra.ebi.ac.uk:/vol1/fastq/SRR789/000/SRR7890830/SRR7890830_1.fastq.gz \
-            ./ascp_test_download.fastq.gz
-          echo "ascp exit code: $?"
-          echo "=== Result ==="
-          ls -la ascp_test_download.fastq.gz 2>&1 || echo "NO FILE PRODUCED"
-
-          echo "=== For comparison, 60s of plain curl+pv on the same file ==="
+          echo "=== TEST B: single-stream curl for 60s (baseline) ==="
           timeout 60 bash -c '
-            curl -sS -L "https://ftp.sra.ebi.ac.uk/vol1/fastq/SRR789/000/SRR7890830/SRR7890830_1.fastq.gz" | \
-              pv -f -N "https_baseline" -i 10 > /dev/null
+            curl -sS -L "'"$URL"'" | pv -f -N "https_single" -i 10 > /dev/null
           ' || true
 
       - name: Verify uploaded sizes
