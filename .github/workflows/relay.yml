@@ -15,11 +15,13 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 350
     steps:
-      - name: Install AWS CLI
+      - name: Install AWS CLI and pv
         run: |
           curl -sS "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip" -o "awscliv2.zip"
           unzip -q awscliv2.zip
           sudo ./aws/install --update
+          sudo apt-get update -y
+          sudo apt-get install -y pv
 
       - name: Configure AWS profile
         run: |
@@ -58,6 +60,7 @@ jobs:
             name=$(basename "$f")
             echo "=== Relaying $name ==="
             curl -sS -L --fail "https://ftp.sra.ebi.ac.uk/vol1/fastq/$f" | \
+              pv -f -N "$name" -i 15 | \
               aws --profile dellcsc s3 cp - "s3://v89865/rtx6000_bench/fastq/wes/$name"
             echo "=== Done $name ==="
           done
@@ -76,6 +79,7 @@ jobs:
             name=$(basename "$f")
             echo "=== Relaying $name ==="
             curl -sS -L --fail "https://ftp.sra.ebi.ac.uk/vol1/fastq/$f" | \
+              pv -f -N "$name" -i 15 | \
               aws --profile dellcsc s3 cp - "s3://v89865/rtx6000_bench/fastq/wgs/$name"
             echo "=== Done $name ==="
           done
