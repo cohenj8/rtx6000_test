@@ -9,6 +9,7 @@ on:
         options:
           - wes
           - wgs
+          - aspera_test
 
 jobs:
   relay:
@@ -46,44 +47,94 @@ jobs:
           EOF
           chmod 600 ~/.aws/credentials ~/.aws/config
 
-      - name: Relay WES FASTQ (EBI -> S3, streamed, no local disk)
+      - name: Relay WES FASTQ (EBI -> S3, streamed in parallel, no local disk)
         if: ${{ github.event.inputs.dataset == 'wes' }}
         run: |
-          set -euo pipefail
+          set -uo pipefail
           FILES=(
             "SRR789/000/SRR7890830/SRR7890830_1.fastq.gz"
             "SRR789/000/SRR7890830/SRR7890830_2.fastq.gz"
             "SRR789/006/SRR7890846/SRR7890846_1.fastq.gz"
             "SRR789/006/SRR7890846/SRR7890846_2.fastq.gz"
           )
+          PIDS=()
           for f in "${FILES[@]}"; do
             name=$(basename "$f")
-            echo "=== Relaying $name ==="
-            curl -sS -L --fail "https://ftp.sra.ebi.ac.uk/vol1/fastq/$f" | \
-              pv -f -N "$name" -i 15 | \
-              aws --profile dellcsc s3 cp - "s3://v89865/rtx6000_bench/fastq/wes/$name"
-            echo "=== Done $name ==="
+            (
+              echo "=== Relaying $name ==="
+              curl -sS -L --fail "https://ftp.sra.ebi.ac.uk/vol1/fastq/$f" | \
+                pv -f -N "$name" -i 15 | \
+                aws --profile dellcsc s3 cp - "s3://v89865/rtx6000_bench/fastq/wes/$name"
+              echo "=== Done $name ==="
+            ) &
+            PIDS+=($!)
           done
+          FAIL=0
+          for pid in "${PIDS[@]}"; do
+            wait "$pid" || FAIL=1
+          done
+          exit $FAIL
 
-      - name: Relay WGS FASTQ (EBI -> S3, streamed, no local disk)
+      - name: Relay WGS FASTQ (EBI -> S3, streamed in parallel, no local disk)
         if: ${{ github.event.inputs.dataset == 'wgs' }}
         run: |
-          set -euo pipefail
+          set -uo pipefail
           FILES=(
             "SRR789/004/SRR7890824/SRR7890824_1.fastq.gz"
             "SRR789/004/SRR7890824/SRR7890824_2.fastq.gz"
             "SRR789/007/SRR7890827/SRR7890827_1.fastq.gz"
             "SRR789/007/SRR7890827/SRR7890827_2.fastq.gz"
           )
+          PIDS=()
           for f in "${FILES[@]}"; do
             name=$(basename "$f")
-            echo "=== Relaying $name ==="
-            curl -sS -L --fail "https://ftp.sra.ebi.ac.uk/vol1/fastq/$f" | \
-              pv -f -N "$name" -i 15 | \
-              aws --profile dellcsc s3 cp - "s3://v89865/rtx6000_bench/fastq/wgs/$name"
-            echo "=== Done $name ==="
+            (
+              echo "=== Relaying $name ==="
+              curl -sS -L --fail "https://ftp.sra.ebi.ac.uk/vol1/fastq/$f" | \
+                pv -f -N "$name" -i 15 | \
+                aws --profile dellcsc s3 cp - "s3://v89865/rtx6000_bench/fastq/wgs/$name"
+              echo "=== Done $name ==="
+            ) &
+            PIDS+=($!)
           done
+          FAIL=0
+          for pid in "${PIDS[@]}"; do
+            wait "$pid" || FAIL=1
+          done
+          exit $FAIL
+
+      - name: Test Aspera (ascp) throughput vs HTTPS
+        if: ${{ github.event.inputs.dataset == 'aspera_test' }}
+        run: |
+          set -uo pipefail
+          echo "=== Installing Aspera Connect ==="
+          curl -sSL -o aspera_installer.sh \
+            "https://d3gcli72yxqn2z.cloudfront.net/downloads/connect/latest/bin/ibm-aspera-connect_4.2.12.780_linux_x86_64.sh" \
+            || { echo "INSTALLER_DOWNLOAD_FAILED"; exit 1; }
+          sh aspera_installer.sh || echo "INSTALLER_RUN_RETURNED_NONZERO"
+          export PATH=$HOME/.aspera/connect/bin:$PATH
+          which ascp || { echo "ASCP_NOT_FOUND_AFTER_INSTALL"; exit 1; }
+          ascp --version
+
+          KEY=$HOME/.aspera/connect/etc/asperaweb_id_dsa.openssh
+          ls -la "$KEY" || echo "KEY_MISSING"
+
+          echo "=== Timed ascp test (60s, capped rate 800Mbps target) ==="
+          timeout 70 ascp -QT -l 800m -P33001 \
+            -i "$KEY" \
+            era-fasp@fasp.sra.ebi.ac.uk:/vol1/fastq/SRR789/000/SRR7890830/SRR7890830_1.fastq.gz \
+            ./ascp_test_download.fastq.gz
+          echo "ascp exit code: $?"
+          echo "=== Result ==="
+          ls -la ascp_test_download.fastq.gz 2>&1 || echo "NO FILE PRODUCED"
+
+          echo "=== For comparison, 60s of plain curl+pv on the same file ==="
+          timeout 60 bash -c '
+            curl -sS -L "https://ftp.sra.ebi.ac.uk/vol1/fastq/SRR789/000/SRR7890830/SRR7890830_1.fastq.gz" | \
+              pv -f -N "https_baseline" -i 10 > /dev/null
+          ' || true
 
       - name: Verify uploaded sizes
+        if: ${{ github.event.inputs.dataset == 'wes' || github.event.inputs.dataset == 'wgs' }}
         run: |
           aws --profile dellcsc s3 ls "s3://v89865/rtx6000_bench/fastq/${{ github.event.inputs.dataset }}/" --human-readable
